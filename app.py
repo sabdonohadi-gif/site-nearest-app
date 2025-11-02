@@ -1,11 +1,11 @@
 import streamlit as st
 import pandas as pd
-from io import BytesIO
 from geopy.distance import geodesic
+from datetime import datetime
+from io import BytesIO
 from openpyxl import load_workbook
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
-from datetime import datetime
 import os
 
 # =========================================================
@@ -13,12 +13,13 @@ import os
 # =========================================================
 st.set_page_config(page_title="📍 Site Nearest Finder", layout="wide")
 st.title("📍 Site Nearest Finder")
-st.write("Upload file **Mapinfo.xls** terlebih dahulu, lalu pilih input **ATND.xls** atau input manual site yang ingin dicek.")
+st.write("Upload file **Mapinfo.xls** (tersimpan di memori). "
+         "Lalu pilih upload file **ATND.xls** atau input site manual (Site ID, Longitude, Latitude).")
 
 # =========================================================
 # 1️⃣ Upload & Simpan Mapinfo
 # =========================================================
-MAPINFO_PATH = "Mapinfo.xls"
+MAPINFO_PATH = "Mapinfo.xlsx"
 
 uploaded_mapinfo = st.file_uploader("📂 Upload / Update Mapinfo.xls", type=["xls", "xlsx"])
 
@@ -28,17 +29,17 @@ if uploaded_mapinfo:
     if not required_cols_map.issubset(df_map.columns):
         st.error(f"Kolom wajib hilang di Mapinfo.xls: {required_cols_map - set(df_map.columns)}")
         st.stop()
-    df_map.to_excel(MAPINFO_PATH, index=False)
-    st.success(f"✅ Mapinfo berhasil dimuat ({len(df_map)} site).")
+    df_map.to_excel(MAPINFO_PATH, index=False, engine="openpyxl")
+    st.success(f"✅ Mapinfo berhasil dimuat dan disimpan ({len(df_map)} site).")
 elif os.path.exists(MAPINFO_PATH):
     df_map = pd.read_excel(MAPINFO_PATH)
     st.info(f"📂 Menggunakan Mapinfo tersimpan ({len(df_map)} site).")
 else:
-    st.warning("⚠️ Upload Mapinfo.xls terlebih dahulu.")
+    st.warning("⚠️ Upload Mapinfo.xls terlebih dahulu untuk melanjutkan.")
     st.stop()
 
 # =========================================================
-# 2️⃣ Input: Upload ATND atau Manual
+# 2️⃣ Pilih metode input site
 # =========================================================
 st.markdown("---")
 st.subheader("🗂️ Pilih Cara Input Site yang Akan Dicek")
@@ -46,44 +47,44 @@ st.subheader("🗂️ Pilih Cara Input Site yang Akan Dicek")
 input_mode = st.radio("Pilih metode input:", ["Upload ATND.xls", "Input Manual"])
 df_sites = None
 
-required_cols_sites = ["Site ID", "Longitude", "Latitude"]
+required_cols_sites_full = ["Site ID", "NE ID", "Sitename", "Longitude", "Latitude"]
+required_cols_sites_manual = ["Site ID", "Longitude", "Latitude"]
 
+# Upload ATND.xls
 if input_mode == "Upload ATND.xls":
     uploaded_sites = st.file_uploader("📂 Upload ATND.xls", type=["xls", "xlsx"])
     if uploaded_sites:
         df_sites = pd.read_excel(uploaded_sites)
-        df_sites = df_sites[[c for c in required_cols_sites if c in df_sites.columns]]
-        missing = set(required_cols_sites) - set(df_sites.columns)
-        if missing:
-            st.error(f"Kolom wajib hilang di ATND.xls: {missing}")
+        if not set(required_cols_sites_full).issubset(df_sites.columns):
+            st.error(f"Kolom wajib hilang di ATND.xls: {set(required_cols_sites_full) - set(df_sites.columns)}")
             st.stop()
         st.success(f"✅ File ATND dimuat ({len(df_sites)} site).")
 
+# Input Manual
 else:
-    st.markdown("Masukkan data site manual (kolom: Site ID, Longitude, Latitude):")
+    st.markdown("Masukkan data site manual (3 kolom: Site ID, Longitude, Latitude):")
 
     if "manual_sites" not in st.session_state:
-        st.session_state.manual_sites = pd.DataFrame(columns=required_cols_sites)
-
-    manual_df = st.session_state.manual_sites.copy()
-
-    edited_df = st.data_editor(
-        manual_df,
-        num_rows="dynamic",
-        use_container_width=True,
-        key="manual_editor"
-    )
-
-    st.session_state.manual_sites = edited_df
-    df_sites = edited_df.dropna(subset=["Site ID", "Longitude", "Latitude"], how="any")
+        st.session_state.manual_sites = pd.DataFrame(columns=required_cols_sites_manual)
 
     col1, col2 = st.columns(2)
     with col1:
-        if st.button("➕ Tambah Baris Baru"):
+        if st.button("➕ Tambah Baris"):
             st.session_state.manual_sites.loc[len(st.session_state.manual_sites)] = ["", "", ""]
     with col2:
-        if st.button("➖ Hapus Baris Terakhir") and len(st.session_state.manual_sites) > 0:
-            st.session_state.manual_sites = st.session_state.manual_sites.iloc[:-1]
+        if st.button("➖ Hapus Baris Terakhir"):
+            if not st.session_state.manual_sites.empty:
+                st.session_state.manual_sites = st.session_state.manual_sites.iloc[:-1]
+
+    manual_df = st.data_editor(
+        st.session_state.manual_sites,
+        num_rows="dynamic",
+        key="manual_editor",
+        use_container_width=True
+    )
+
+    # Hanya baris valid
+    df_sites = manual_df.dropna(subset=["Site ID", "Longitude", "Latitude"], how="any")
 
 # =========================================================
 # 3️⃣ Tombol Proses
@@ -91,6 +92,8 @@ else:
 if df_sites is not None and not df_sites.empty:
     if st.button("🚀 Proses Sekarang"):
         with st.spinner("Menghitung site terdekat..."):
+            df_map = pd.read_excel(MAPINFO_PATH)
+
             def get_top3_nearest(lat, lon):
                 target = (lat, lon)
                 df_map["Distance_km"] = df_map.apply(
@@ -136,9 +139,10 @@ if df_sites is not None and not df_sites.empty:
                     cell.alignment = Alignment(horizontal="left", vertical="center")
                     cell.border = border
 
+            # Auto-adjust lebar kolom
             for col in ws.columns:
+                max_length = max((len(str(cell.value)) if cell.value else 0) for cell in col)
                 col_letter = get_column_letter(col[0].column)
-                max_length = max(len(str(cell.value)) if cell.value else 0 for cell in col)
                 ws.column_dimensions[col_letter].width = min(max(10, max_length + 2), 40)
 
             buf = BytesIO()
@@ -158,6 +162,7 @@ if df_sites is not None and not df_sites.empty:
             )
 
             st.dataframe(df_result, use_container_width=True)
+
 else:
     st.info("Silakan upload file ATND atau input manual data site terlebih dahulu.")
 
