@@ -6,8 +6,6 @@ from io import BytesIO
 from openpyxl import load_workbook
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
-import folium
-from streamlit_folium import st_folium
 
 # =========================================================
 # Konfigurasi dasar Streamlit
@@ -57,21 +55,42 @@ if input_mode == "Upload ATND.xls":
         if not set(required_cols_sites).issubset(df_sites.columns):
             st.error(f"Kolom wajib hilang di ATND.xls: {set(required_cols_sites) - set(df_sites.columns)}")
             st.stop()
+        df_sites.insert(0, "No", range(1, len(df_sites) + 1))
         st.success(f"✅ File ATND dimuat ({len(df_sites)} site).")
 
 else:
     st.markdown("Masukkan data site manual (kolom sama seperti ATND.xls):")
+
+    # Inisialisasi jika belum ada data
     if "manual_sites" not in st.session_state:
         st.session_state.manual_sites = pd.DataFrame(columns=required_cols_sites)
 
-    manual_df = st.data_editor(
-        st.session_state.manual_sites,
-        num_rows="dynamic",
+    col1, col2 = st.columns([1, 1])
+    with col1:
+        if st.button("➕ Tambah Baris Baru"):
+            new_row = pd.DataFrame([{col: "" for col in required_cols_sites}])
+            st.session_state.manual_sites = pd.concat([st.session_state.manual_sites, new_row], ignore_index=True)
+    with col2:
+        if st.button("🗑️ Hapus Baris Terakhir"):
+            if not st.session_state.manual_sites.empty:
+                st.session_state.manual_sites = st.session_state.manual_sites.iloc[:-1]
+            else:
+                st.warning("Tidak ada baris untuk dihapus.")
+
+    # Tampilkan tabel editor dengan kolom No otomatis
+    manual_df = st.session_state.manual_sites.copy()
+    manual_df.insert(0, "No", range(1, len(manual_df) + 1))
+
+    edited_df = st.data_editor(
+        manual_df,
+        num_rows="fixed",
         key="manual_editor",
         use_container_width=True
     )
 
-    df_sites = manual_df.dropna(subset=["Site ID", "Longitude", "Latitude"], how="any")
+    # Simpan hasil edit tanpa kolom No
+    st.session_state.manual_sites = edited_df.drop(columns=["No"])
+    df_sites = edited_df.dropna(subset=["Site ID", "Longitude", "Latitude"], how="any")
 
 # =========================================================
 # 3️⃣ Tombol Proses
@@ -148,39 +167,6 @@ if df_sites is not None and not df_sites.empty:
             )
 
             st.dataframe(df_result, use_container_width=True)
-
-            # =========================================================
-            # 6️⃣ Peta Satelit Interaktif
-            # =========================================================
-            st.markdown("---")
-            st.subheader("🛰️ Peta Satelit Lokasi Site dan Tetangga Terdekat")
-
-            if not df_sites.empty:
-                # Titik tengah peta
-                avg_lat = df_sites["Latitude"].mean()
-                avg_lon = df_sites["Longitude"].mean()
-                m = folium.Map(location=[avg_lat, avg_lon], zoom_start=10, tiles="Esri.WorldImagery")
-
-                # Titik Mapinfo
-                for _, row in df_map.iterrows():
-                    folium.CircleMarker(
-                        location=[row["Latitude"], row["Longitude"]],
-                        radius=4,
-                        color="lightblue",
-                        fill=True,
-                        fill_opacity=0.5,
-                        popup=f"{row['Site ID']} - {row['BSC']}"
-                    ).add_to(m)
-
-                # Titik input (merah)
-                for _, row in df_sites.iterrows():
-                    folium.Marker(
-                        location=[row["Latitude"], row["Longitude"]],
-                        popup=f"<b>{row['Site ID']}</b><br>{row['Sitename']}",
-                        icon=folium.Icon(color="red", icon="info-sign")
-                    ).add_to(m)
-
-                st_folium(m, width=1000, height=600)
 else:
     st.info("Silakan upload file ATND atau input manual data site terlebih dahulu.")
 
