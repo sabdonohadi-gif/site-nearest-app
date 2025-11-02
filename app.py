@@ -5,12 +5,11 @@ from geopy.distance import geodesic
 from io import BytesIO
 from datetime import datetime
 from openpyxl import Workbook
-import os
 
 st.set_page_config(page_title="Site Nearest Finder", layout="wide")
 
 st.title("📡 Site Nearest Finder (Versi XLS + Manual Input)")
-st.write("Upload `Mapinfo.xls` (berisi Site ID, Longitude, Latitude, BSC) dan input site secara manual atau via file.")
+st.write("Upload `Mapinfo.xls` (berisi Site ID, Longitude, Latitude, BSC) dan input site secara manual tanpa perlu file ATND.")
 
 # =======================================
 # 1️⃣ Upload / Simpan Mapinfo
@@ -49,7 +48,7 @@ with st.form("manual_input_form"):
     submit_manual = st.form_submit_button("✅ Tambahkan Site Manual")
 
 if "manual_sites" not in st.session_state:
-    st.session_state.manual_sites = pd.DataFrame(columns=["Site ID", "Longitude", "Latitude"])
+    st.session_state.manual_sites = pd.DataFrame(columns=["No", "Site ID", "Longitude", "Latitude"])
 
 if submit_manual and manual_text.strip():
     rows = [r.strip() for r in manual_text.splitlines() if r.strip()]
@@ -69,12 +68,18 @@ if submit_manual and manual_text.strip():
             st.warning(f"⚠️ Format salah, gunakan format: SiteID,Longitude,Latitude → {row}")
     if parsed_data:
         new_df = pd.DataFrame(parsed_data)
-        st.session_state.manual_sites = pd.concat([st.session_state.manual_sites, new_df], ignore_index=True)
+        st.session_state.manual_sites = pd.concat(
+            [st.session_state.manual_sites[["Site ID", "Longitude", "Latitude"]], new_df],
+            ignore_index=True
+        )
+        st.session_state.manual_sites.insert(0, "No", range(1, len(st.session_state.manual_sites) + 1))
         st.success(f"✅ {len(parsed_data)} site berhasil ditambahkan.")
 
 if not st.session_state.manual_sites.empty:
     st.subheader("📋 Daftar Site Input Manual")
-    st.dataframe(st.session_state.manual_sites)
+    df_show = st.session_state.manual_sites.copy()
+    df_show["No"] = range(1, len(df_show) + 1)
+    st.dataframe(df_show)
 
 # =======================================
 # 3️⃣ Proses Hitung Nearest
@@ -125,7 +130,7 @@ if st.button("🚀 Proses Cari 3 Nearest Site"):
     )
 
     # =======================================
-    # 5️⃣ Peta Interaktif
+    # 5️⃣ Peta Interaktif (Satelit Mode)
     # =======================================
     markers = []
     lines = []
@@ -193,13 +198,8 @@ if st.button("🚀 Proses Cari 3 Nearest Site"):
         else:
             layers = [scatter]
 
-        # dropdown map style
-        style_option = st.selectbox("🗺️ Pilih gaya peta:", ["Light", "Dark", "Satellite"])
-        map_styles = {
-            "Light": "mapbox://styles/mapbox/light-v9",
-            "Dark": "mapbox://styles/mapbox/dark-v9",
-            "Satellite": "mapbox://styles/mapbox/satellite-v9"
-        }
+        # Map style tetap Satelit
+        map_style = "mapbox://styles/mapbox/satellite-v9"
 
         center_lat = marker_df["lat"].mean()
         center_lon = marker_df["lon"].mean()
@@ -222,8 +222,8 @@ if st.button("🚀 Proses Cari 3 Nearest Site"):
             layers=layers,
             initial_view_state=view_state,
             tooltip=tooltip_html,
-            map_style=map_styles[style_option],
+            map_style=map_style,
         )
 
-        st.subheader("📍 Peta Interaktif — Hover titik untuk lihat Site ID & BSC")
+        st.subheader("🛰️ Peta Interaktif (Mode Satelit) — Hover titik untuk lihat Site ID & BSC")
         st.pydeck_chart(r, use_container_width=True)
