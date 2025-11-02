@@ -2,5 +2,5 @@ streamlit
 pandas
 geopy
 openpyxl
-tqdm
-xlrd
+folium
+streamlit-folium
