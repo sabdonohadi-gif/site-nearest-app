@@ -1,147 +1,166 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
 import pydeck as pdk
-from math import radians, sin, cos, sqrt, atan2
+from geopy.distance import geodesic
+from io import BytesIO
+from datetime import datetime
+from openpyxl import Workbook
+import os
 
-# ================================================
-# 🧭 Fungsi untuk hitung jarak antar koordinat (Haversine)
-# ================================================
-def haversine(lat1, lon1, lat2, lon2):
-    R = 6371.0  # radius bumi dalam km
-    lat1, lon1, lat2, lon2 = map(radians, [lat1, lon1, lat2, lon2])
-    dlon, dlat = lon2 - lon1, lat2 - lat1
-    a = sin(dlat/2)**2 + cos(lat1) * cos(lat2) * sin(dlon/2)**2
-    c = 2 * atan2(sqrt(a), sqrt(1 - a))
-    return R * c
+st.set_page_config(page_title="Site Nearest Finder", layout="wide")
 
+st.title("📡 Site Nearest Finder (Versi XLS + Manual Input)")
+st.write("Upload `Mapinfo.xls` (berisi Site ID, Longitude, Latitude, BSC) dan input site secara manual atau via file.")
 
-# ================================================
-# 🚀 Streamlit UI
-# ================================================
-st.set_page_config(page_title="Nearest Site Finder", layout="wide")
+# =======================================
+# 1️⃣ Upload / Simpan Mapinfo
+# =======================================
+if "mapinfo_df" not in st.session_state:
+    st.session_state.mapinfo_df = None
 
-st.title("📍 Nearest Site Finder + Mapinfo View")
-st.write("Upload file Mapinfo (CSV) dan cari 3 site terdekat berdasarkan koordinat input atau file ATND.")
-
-# ================================================
-# 📁 Upload Mapinfo
-# ================================================
-uploaded_mapinfo = st.file_uploader("📂 Upload Mapinfo CSV", type=["csv"])
-mapinfo_df = None
+st.header("🗺️ Upload Mapinfo (XLS)")
+uploaded_mapinfo = st.file_uploader("Pilih file Mapinfo.xls", type=["xls", "xlsx"])
 
 if uploaded_mapinfo:
-    try:
-        mapinfo_df = pd.read_csv(uploaded_mapinfo)
-        mapinfo_df.columns = map(str.lower, mapinfo_df.columns)
-        # pastikan kolom wajib ada
-        required_cols = {"site_id", "lat", "lon"}
-        if not required_cols.issubset(set(mapinfo_df.columns)):
-            st.error("❌ File Mapinfo harus punya kolom: site_id, lat, lon")
-            mapinfo_df = None
+    df_map = pd.read_excel(uploaded_mapinfo)
+    required_cols = {"Site ID", "Longitude", "Latitude", "BSC"}
+    if not required_cols.issubset(df_map.columns):
+        st.error(f"❌ Kolom wajib hilang di file: {required_cols - set(df_map.columns)}")
+    else:
+        st.session_state.mapinfo_df = df_map.copy()
+        st.success(f"✅ Mapinfo berhasil dimuat ({len(df_map)} site).")
+        st.dataframe(df_map.head())
+elif st.session_state.mapinfo_df is not None:
+    st.info("📂 Menggunakan Mapinfo yang sudah diunggah sebelumnya.")
+    df_map = st.session_state.mapinfo_df
+else:
+    st.warning("⚠️ Harap upload file Mapinfo terlebih dahulu sebelum memproses.")
+    st.stop()
+
+# =======================================
+# 2️⃣ Input Manual Site(s)
+# =======================================
+st.header("✏️ Input Manual Site untuk Dicari 3 Terdekat")
+
+with st.form("manual_input_form"):
+    st.markdown("Masukkan beberapa site sekaligus (pisahkan baris per site):")
+    st.text("Contoh:\nSITE001,106.82,-6.18\nSITE002,106.77,-6.12")
+    manual_text = st.text_area("Masukkan data (Site ID, Longitude, Latitude):", height=150)
+    submit_manual = st.form_submit_button("✅ Tambahkan Site Manual")
+
+if "manual_sites" not in st.session_state:
+    st.session_state.manual_sites = pd.DataFrame(columns=["Site ID", "Longitude", "Latitude"])
+
+if submit_manual and manual_text.strip():
+    rows = [r.strip() for r in manual_text.splitlines() if r.strip()]
+    parsed_data = []
+    for row in rows:
+        parts = [p.strip() for p in row.split(",")]
+        if len(parts) == 3:
+            try:
+                parsed_data.append({
+                    "Site ID": parts[0],
+                    "Longitude": float(parts[1]),
+                    "Latitude": float(parts[2])
+                })
+            except ValueError:
+                st.warning(f"⚠️ Format angka salah di baris: {row}")
         else:
-            st.success(f"✅ Mapinfo berhasil dimuat ({len(mapinfo_df)} baris)")
-    except Exception as e:
-        st.error(f"Gagal membaca file Mapinfo: {e}")
+            st.warning(f"⚠️ Format salah, gunakan format: SiteID,Longitude,Latitude → {row}")
+    if parsed_data:
+        new_df = pd.DataFrame(parsed_data)
+        st.session_state.manual_sites = pd.concat([st.session_state.manual_sites, new_df], ignore_index=True)
+        st.success(f"✅ {len(parsed_data)} site berhasil ditambahkan.")
 
-# ================================================
-# 🧾 Input Site (manual atau file ATND)
-# ================================================
-st.divider()
-st.subheader("🛰️ Input Site")
+if not st.session_state.manual_sites.empty:
+    st.subheader("📋 Daftar Site Input Manual")
+    st.dataframe(st.session_state.manual_sites)
 
-input_option = st.radio("Pilih sumber input site:", ["Manual", "Upload ATND (CSV)"])
+# =======================================
+# 3️⃣ Proses Hitung Nearest
+# =======================================
+if st.button("🚀 Proses Cari 3 Nearest Site"):
+    if st.session_state.manual_sites.empty:
+        st.error("❌ Harap input minimal 1 site manual terlebih dahulu.")
+        st.stop()
 
-input_sites = pd.DataFrame()
+    df_map = st.session_state.mapinfo_df.copy()
+    df_sites = st.session_state.manual_sites.copy()
 
-if input_option == "Manual":
-    site_id = st.text_input("Masukkan Site ID (contoh: TNG001):")
-    lat = st.number_input("Latitude:", format="%.6f")
-    lon = st.number_input("Longitude:", format="%.6f")
-    if site_id and lat and lon:
-        input_sites = pd.DataFrame([{"site_id": site_id, "lat": lat, "lon": lon}])
-elif input_option == "Upload ATND (CSV)":
-    uploaded_atnd = st.file_uploader("📄 Upload ATND CSV", type=["csv"])
-    if uploaded_atnd:
-        try:
-            input_sites = pd.read_csv(uploaded_atnd)
-            input_sites.columns = map(str.lower, input_sites.columns)
-            if not {"site_id", "lat", "lon"}.issubset(set(input_sites.columns)):
-                st.error("❌ File ATND harus punya kolom: site_id, lat, lon")
-                input_sites = pd.DataFrame()
-            else:
-                st.success(f"✅ ATND berhasil dimuat ({len(input_sites)} baris)")
-        except Exception as e:
-            st.error(f"Gagal membaca file ATND: {e}")
+    def get_top3_nearest(lat, lon):
+        target = (lat, lon)
+        df_map["Distance_km"] = df_map.apply(
+            lambda row: geodesic(target, (row["Latitude"], row["Longitude"])).km, axis=1
+        )
+        nearest = df_map.nsmallest(3, "Distance_km")[["Site ID", "BSC", "Distance_km"]]
+        return [
+            f"{nearest.iloc[i]['Site ID']} - {nearest.iloc[i]['BSC']} ({nearest.iloc[i]['Distance_km']:.2f} km)"
+            for i in range(3)
+        ]
 
-# ================================================
-# 🔍 Proses cari nearest site
-# ================================================
-if mapinfo_df is not None and not input_sites.empty:
-    if st.button("🚀 Proses Cari 3 Nearest Site"):
-        nearest_results = []
-        markers = []
-        lines = []
+    nearest_data = []
+    for _, row in df_sites.iterrows():
+        nearest_data.append(get_top3_nearest(row["Latitude"], row["Longitude"]))
 
-        for _, row in input_sites.iterrows():
-            site_id = row["site_id"]
-            lat, lon = row["lat"], row["lon"]
+    nearest_df = pd.DataFrame(nearest_data, columns=["Nearest Site 1", "Nearest Site 2", "Nearest Site 3"])
+    df_result = pd.concat([df_sites.reset_index(drop=True), nearest_df], axis=1)
 
-            mapinfo_df["distance_km"] = mapinfo_df.apply(
-                lambda x: haversine(lat, lon, x["lat"], x["lon"]), axis=1
-            )
-            nearest = mapinfo_df.nsmallest(3, "distance_km")
+    # =======================================
+    # 4️⃣ Simpan ke Excel
+    # =======================================
+    output = BytesIO()
+    today = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"Nearest_Result_{today}.xlsx"
+    df_result.to_excel(output, index=False, engine="openpyxl")
+    output.seek(0)
 
-            for _, nrow in nearest.iterrows():
-                nearest_results.append({
-                    "input_site": site_id,
-                    "nearest_site": nrow["site_id"],
-                    "distance_km": round(nrow["distance_km"], 3)
+    st.success("✅ Proses selesai! Berikut hasilnya:")
+    st.dataframe(df_result)
+
+    st.download_button(
+        label="⬇️ Download Hasil Excel",
+        data=output,
+        file_name=filename,
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+    # =======================================
+    # 5️⃣ Peta Interaktif
+    # =======================================
+    markers = []
+    lines = []
+
+    for _, row in df_sites.iterrows():
+        markers.append({
+            "site_id": row["Site ID"],
+            "bsc": "-",
+            "lon": row["Longitude"],
+            "lat": row["Latitude"],
+            "type": "input"
+        })
+        nearest_sites = df_result.loc[df_result["Site ID"] == row["Site ID"], ["Nearest Site 1", "Nearest Site 2", "Nearest Site 3"]].values[0]
+        for ns in nearest_sites:
+            site_id, bsc_info = ns.split(" - ")
+            bsc = bsc_info.split("(")[0].strip()
+            nearest_row = df_map[df_map["Site ID"] == site_id]
+            if not nearest_row.empty:
+                n_row = nearest_row.iloc[0]
+                markers.append({
+                    "site_id": n_row["Site ID"],
+                    "bsc": n_row["BSC"],
+                    "lon": n_row["Longitude"],
+                    "lat": n_row["Latitude"],
+                    "type": "nearest"
                 })
                 lines.append({
-                    "from_lon": lon,
-                    "from_lat": lat,
-                    "to_lon": nrow["lon"],
-                    "to_lat": nrow["lat"]
+                    "from_lat": row["Latitude"],
+                    "from_lon": row["Longitude"],
+                    "to_lat": n_row["Latitude"],
+                    "to_lon": n_row["Longitude"]
                 })
 
-            # marker input
-            markers.append({"site_id": site_id, "lat": lat, "lon": lon, "type": "input", "sitename": site_id})
-            # marker nearest
-            for _, nrow in nearest.iterrows():
-                markers.append({
-                    "site_id": nrow["site_id"],
-                    "lat": nrow["lat"],
-                    "lon": nrow["lon"],
-                    "type": "nearest",
-                    "sitename": nrow.get("sitename", nrow["site_id"])
-                })
-
-        nearest_df = pd.DataFrame(nearest_results)
-        st.success("✅ Proses selesai!")
-        st.dataframe(nearest_df)
-
-        # ================================================
-        # 🌍 Peta Interaktif dengan Tooltip + Theme
-        # ================================================
-        st.divider()
-        st.subheader("🗺️ Peta Interaktif")
-
-        style_option = st.selectbox("🗺️ Pilih gaya peta:", ["Light", "Dark", "Satellite"])
-        map_styles = {
-            "Light": "mapbox://styles/mapbox/light-v9",
-            "Dark": "mapbox://styles/mapbox/dark-v9",
-            "Satellite": "mapbox://styles/mapbox/satellite-v9"
-        }
-
-        if st.button("🔍 Zoom ke semua titik"):
-            zoom_auto = True
-        else:
-            zoom_auto = False
-
-        # deduplicate markers
-        unique_markers = {(m["site_id"], m["lat"], m["lon"], m["type"], m["sitename"]): m for m in markers}
-        marker_df = pd.DataFrame(unique_markers.values())
+    if markers:
+        marker_df = pd.DataFrame(markers)
         marker_df["coordinates"] = marker_df.apply(lambda r: [r["lon"], r["lat"]], axis=1)
         marker_df["color"] = marker_df["type"].apply(lambda t: [0, 116, 217] if t == "input" else [34, 139, 34])
 
@@ -157,9 +176,8 @@ if mapinfo_df is not None and not input_sites.empty:
             auto_highlight=True,
         )
 
-        # line layer
-        lines_df = pd.DataFrame(lines)
-        if not lines_df.empty:
+        if lines:
+            lines_df = pd.DataFrame(lines)
             lines_df["from"] = lines_df.apply(lambda r: [r["from_lon"], r["from_lat"]], axis=1)
             lines_df["to"] = lines_df.apply(lambda r: [r["to_lon"], r["to_lat"]], axis=1)
             line_layer = pdk.Layer(
@@ -175,12 +193,21 @@ if mapinfo_df is not None and not input_sites.empty:
         else:
             layers = [scatter]
 
-        # zoom center
-        center_lat, center_lon = marker_df["lat"].mean(), marker_df["lon"].mean()
-        view_state = pdk.ViewState(latitude=center_lat, longitude=center_lon, zoom=11 if zoom_auto else 10, pitch=0)
+        # dropdown map style
+        style_option = st.selectbox("🗺️ Pilih gaya peta:", ["Light", "Dark", "Satellite"])
+        map_styles = {
+            "Light": "mapbox://styles/mapbox/light-v9",
+            "Dark": "mapbox://styles/mapbox/dark-v9",
+            "Satellite": "mapbox://styles/mapbox/satellite-v9"
+        }
+
+        center_lat = marker_df["lat"].mean()
+        center_lon = marker_df["lon"].mean()
+
+        view_state = pdk.ViewState(latitude=center_lat, longitude=center_lon, zoom=10, pitch=0)
 
         tooltip_html = {
-            "html": "<b>Site ID:</b> {site_id}<br><b>Name/BSC:</b> {sitename}",
+            "html": "<b>Site ID:</b> {site_id}<br><b>BSC:</b> {bsc}",
             "style": {
                 "backgroundColor": "white",
                 "color": "black",
@@ -191,14 +218,12 @@ if mapinfo_df is not None and not input_sites.empty:
             },
         }
 
-        deck = pdk.Deck(
+        r = pdk.Deck(
             layers=layers,
             initial_view_state=view_state,
             tooltip=tooltip_html,
             map_style=map_styles[style_option],
         )
 
-        st.pydeck_chart(deck, use_container_width=True)
-
-else:
-    st.info("Silakan upload Mapinfo dan input site terlebih dahulu.")
+        st.subheader("📍 Peta Interaktif — Hover titik untuk lihat Site ID & BSC")
+        st.pydeck_chart(r, use_container_width=True)
