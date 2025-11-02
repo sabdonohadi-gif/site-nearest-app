@@ -6,14 +6,18 @@ from io import BytesIO
 from openpyxl import load_workbook
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
-
-st.set_page_config(page_title="📍 Site Nearest Finder", layout="centered")
-st.title("📍 Site Nearest Finder")
-st.write("Upload file **Mapinfo.xls** sekali saja. Lalu kamu bisa pilih: upload file **ATND.xls** atau input site manual.")
-st.write("Mapinfo akan tersimpan di memori, jadi kamu tidak perlu upload ulang setiap kali — hanya saat ingin memperbarui datanya.")
+import folium
+from streamlit_folium import st_folium
 
 # =========================================================
-# 1️⃣ Upload & Simpan Mapinfo.xls
+# Konfigurasi dasar Streamlit
+# =========================================================
+st.set_page_config(page_title="📍 Site Nearest Finder", layout="wide")
+st.title("📍 Site Nearest Finder")
+st.write("Upload file **Mapinfo.xls** (tersimpan di memori). Lalu pilih upload file **ATND.xls** atau input site manual.")
+
+# =========================================================
+# 1️⃣ Upload & Simpan Mapinfo
 # =========================================================
 if "mapinfo_df" not in st.session_state:
     st.session_state.mapinfo_df = None
@@ -27,35 +31,38 @@ if uploaded_mapinfo:
         st.error(f"Kolom wajib hilang di Mapinfo.xls: {required_cols_map - set(df_map.columns)}")
         st.stop()
     st.session_state.mapinfo_df = df_map.copy()
-    st.success(f"✅ Mapinfo berhasil dimuat ({len(df_map)} site). Data tersimpan di memori.")
+    st.success(f"✅ Mapinfo berhasil dimuat ({len(df_map)} site).")
 elif st.session_state.mapinfo_df is not None:
     df_map = st.session_state.mapinfo_df
     st.info(f"📂 Menggunakan Mapinfo tersimpan di memori ({len(df_map)} site).")
 else:
-    st.warning("⚠️ Harap upload file Mapinfo.xls terlebih dahulu sebelum memproses.")
+    st.warning("⚠️ Upload Mapinfo.xls terlebih dahulu.")
     st.stop()
 
 # =========================================================
-# 2️⃣ Pilihan input: Upload atau Manual
+# 2️⃣ Input: Upload ATND atau Manual
 # =========================================================
 st.markdown("---")
 st.subheader("🗂️ Pilih Cara Input Site yang Akan Dicek")
-input_mode = st.radio("Pilih metode input:", ["Upload ATND.xls", "Input Manual"])
 
+input_mode = st.radio("Pilih metode input:", ["Upload ATND.xls", "Input Manual"])
 df_sites = None
+
+required_cols_sites = ["Site ID", "NE ID", "Sitename", "Longitude", "Latitude"]
 
 if input_mode == "Upload ATND.xls":
     uploaded_sites = st.file_uploader("📂 Upload ATND.xls", type=["xls", "xlsx"])
     if uploaded_sites:
         df_sites = pd.read_excel(uploaded_sites)
+        if not set(required_cols_sites).issubset(df_sites.columns):
+            st.error(f"Kolom wajib hilang di ATND.xls: {set(required_cols_sites) - set(df_sites.columns)}")
+            st.stop()
         st.success(f"✅ File ATND dimuat ({len(df_sites)} site).")
 
 else:
-    st.markdown("Masukkan data site secara manual:")
+    st.markdown("Masukkan data site manual (kolom sama seperti ATND.xls):")
     if "manual_sites" not in st.session_state:
-        st.session_state.manual_sites = pd.DataFrame(
-            columns=["No", "Site ID", "Longitude", "Latitude"]
-        )
+        st.session_state.manual_sites = pd.DataFrame(columns=required_cols_sites)
 
     manual_df = st.data_editor(
         st.session_state.manual_sites,
@@ -64,10 +71,6 @@ else:
         use_container_width=True
     )
 
-    # Update nomor urut otomatis
-    if not manual_df.empty:
-        manual_df["No"] = range(1, len(manual_df) + 1)
-
     df_sites = manual_df.dropna(subset=["Site ID", "Longitude", "Latitude"], how="any")
 
 # =========================================================
@@ -75,18 +78,13 @@ else:
 # =========================================================
 if df_sites is not None and not df_sites.empty:
     if st.button("🚀 Proses Sekarang"):
-        with st.spinner("Menghitung jarak site terdekat..."):
+        with st.spinner("Menghitung site terdekat..."):
             df_map = st.session_state.mapinfo_df.copy()
-            required_cols_sites = {"Site ID", "Longitude", "Latitude"}
-
-            if not required_cols_sites.issubset(df_sites.columns):
-                st.error(f"Kolom wajib hilang di input site: {required_cols_sites - set(df_sites.columns)}")
-                st.stop()
 
             def get_top3_nearest(lat, lon):
                 target = (lat, lon)
                 df_map["Distance_km"] = df_map.apply(
-                    lambda row: geodesic(target, (row["Latitude"], row["Longitude"])).km, axis=1
+                    lambda r: geodesic(target, (r["Latitude"], r["Longitude"])).km, axis=1
                 )
                 nearest = df_map.nsmallest(3, "Distance_km")[["Site ID", "BSC", "Distance_km"]]
                 return [
@@ -97,11 +95,7 @@ if df_sites is not None and not df_sites.empty:
             nearest_data = [
                 get_top3_nearest(row["Latitude"], row["Longitude"]) for _, row in df_sites.iterrows()
             ]
-            nearest_df = pd.DataFrame(
-                nearest_data,
-                columns=["Nearest Site 1", "Nearest Site 2", "Nearest Site 3"]
-            )
-
+            nearest_df = pd.DataFrame(nearest_data, columns=["Nearest Site 1", "Nearest Site 2", "Nearest Site 3"])
             df_result = pd.concat([df_sites.reset_index(drop=True), nearest_df], axis=1)
 
             # =========================================================
@@ -155,11 +149,40 @@ if df_sites is not None and not df_sites.empty:
 
             st.dataframe(df_result, use_container_width=True)
 
+            # =========================================================
+            # 6️⃣ Peta Satelit Interaktif
+            # =========================================================
+            st.markdown("---")
+            st.subheader("🛰️ Peta Satelit Lokasi Site dan Tetangga Terdekat")
+
+            if not df_sites.empty:
+                # Titik tengah peta
+                avg_lat = df_sites["Latitude"].mean()
+                avg_lon = df_sites["Longitude"].mean()
+                m = folium.Map(location=[avg_lat, avg_lon], zoom_start=10, tiles="Esri.WorldImagery")
+
+                # Titik Mapinfo
+                for _, row in df_map.iterrows():
+                    folium.CircleMarker(
+                        location=[row["Latitude"], row["Longitude"]],
+                        radius=4,
+                        color="lightblue",
+                        fill=True,
+                        fill_opacity=0.5,
+                        popup=f"{row['Site ID']} - {row['BSC']}"
+                    ).add_to(m)
+
+                # Titik input (merah)
+                for _, row in df_sites.iterrows():
+                    folium.Marker(
+                        location=[row["Latitude"], row["Longitude"]],
+                        popup=f"<b>{row['Site ID']}</b><br>{row['Sitename']}",
+                        icon=folium.Icon(color="red", icon="info-sign")
+                    ).add_to(m)
+
+                st_folium(m, width=1000, height=600)
 else:
     st.info("Silakan upload file ATND atau input manual data site terlebih dahulu.")
 
-# =========================================================
-# 6️⃣ Info tambahan
-# =========================================================
 st.markdown("---")
-st.caption("💾 File Mapinfo tersimpan sementara selama aplikasi masih aktif. Upload ulang hanya jika ingin memperbarui data Mapinfo.")
+st.caption("💾 File Mapinfo tersimpan sementara selama aplikasi aktif. Upload ulang hanya jika ingin memperbarui data.")
