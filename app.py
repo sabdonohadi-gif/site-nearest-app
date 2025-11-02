@@ -1,24 +1,24 @@
 import streamlit as st
 import pandas as pd
-from geopy.distance import geodesic
-from datetime import datetime
 from io import BytesIO
+from geopy.distance import geodesic
 from openpyxl import load_workbook
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
+from datetime import datetime
+import os
 
 # =========================================================
 # Konfigurasi dasar Streamlit
 # =========================================================
 st.set_page_config(page_title="📍 Site Nearest Finder", layout="wide")
 st.title("📍 Site Nearest Finder")
-st.write("Upload file **Mapinfo.xls** (tersimpan di memori). Lalu pilih upload file **ATND.xls** atau input site manual.")
+st.write("Upload file **Mapinfo.xls** terlebih dahulu, lalu pilih input **ATND.xls** atau input manual site yang ingin dicek.")
 
 # =========================================================
 # 1️⃣ Upload & Simpan Mapinfo
 # =========================================================
-if "mapinfo_df" not in st.session_state:
-    st.session_state.mapinfo_df = None
+MAPINFO_PATH = "Mapinfo.xls"
 
 uploaded_mapinfo = st.file_uploader("📂 Upload / Update Mapinfo.xls", type=["xls", "xlsx"])
 
@@ -28,11 +28,11 @@ if uploaded_mapinfo:
     if not required_cols_map.issubset(df_map.columns):
         st.error(f"Kolom wajib hilang di Mapinfo.xls: {required_cols_map - set(df_map.columns)}")
         st.stop()
-    st.session_state.mapinfo_df = df_map.copy()
+    df_map.to_excel(MAPINFO_PATH, index=False)
     st.success(f"✅ Mapinfo berhasil dimuat ({len(df_map)} site).")
-elif st.session_state.mapinfo_df is not None:
-    df_map = st.session_state.mapinfo_df
-    st.info(f"📂 Menggunakan Mapinfo tersimpan di memori ({len(df_map)} site).")
+elif os.path.exists(MAPINFO_PATH):
+    df_map = pd.read_excel(MAPINFO_PATH)
+    st.info(f"📂 Menggunakan Mapinfo tersimpan ({len(df_map)} site).")
 else:
     st.warning("⚠️ Upload Mapinfo.xls terlebih dahulu.")
     st.stop()
@@ -46,51 +46,44 @@ st.subheader("🗂️ Pilih Cara Input Site yang Akan Dicek")
 input_mode = st.radio("Pilih metode input:", ["Upload ATND.xls", "Input Manual"])
 df_sites = None
 
-required_cols_sites = ["Site ID", "NE ID", "Sitename", "Longitude", "Latitude"]
+required_cols_sites = ["Site ID", "Longitude", "Latitude"]
 
 if input_mode == "Upload ATND.xls":
     uploaded_sites = st.file_uploader("📂 Upload ATND.xls", type=["xls", "xlsx"])
     if uploaded_sites:
         df_sites = pd.read_excel(uploaded_sites)
-        if not set(required_cols_sites).issubset(df_sites.columns):
-            st.error(f"Kolom wajib hilang di ATND.xls: {set(required_cols_sites) - set(df_sites.columns)}")
+        df_sites = df_sites[[c for c in required_cols_sites if c in df_sites.columns]]
+        missing = set(required_cols_sites) - set(df_sites.columns)
+        if missing:
+            st.error(f"Kolom wajib hilang di ATND.xls: {missing}")
             st.stop()
-        df_sites.insert(0, "No", range(1, len(df_sites) + 1))
         st.success(f"✅ File ATND dimuat ({len(df_sites)} site).")
 
 else:
-    st.markdown("Masukkan data site manual (kolom sama seperti ATND.xls):")
+    st.markdown("Masukkan data site manual (kolom: Site ID, Longitude, Latitude):")
 
-    # Inisialisasi jika belum ada data
     if "manual_sites" not in st.session_state:
         st.session_state.manual_sites = pd.DataFrame(columns=required_cols_sites)
 
-    col1, col2 = st.columns([1, 1])
-    with col1:
-        if st.button("➕ Tambah Baris Baru"):
-            new_row = pd.DataFrame([{col: "" for col in required_cols_sites}])
-            st.session_state.manual_sites = pd.concat([st.session_state.manual_sites, new_row], ignore_index=True)
-    with col2:
-        if st.button("🗑️ Hapus Baris Terakhir"):
-            if not st.session_state.manual_sites.empty:
-                st.session_state.manual_sites = st.session_state.manual_sites.iloc[:-1]
-            else:
-                st.warning("Tidak ada baris untuk dihapus.")
-
-    # Tampilkan tabel editor dengan kolom No otomatis
     manual_df = st.session_state.manual_sites.copy()
-    manual_df.insert(0, "No", range(1, len(manual_df) + 1))
 
     edited_df = st.data_editor(
         manual_df,
-        num_rows="fixed",
-        key="manual_editor",
-        use_container_width=True
+        num_rows="dynamic",
+        use_container_width=True,
+        key="manual_editor"
     )
 
-    # Simpan hasil edit tanpa kolom No
-    st.session_state.manual_sites = edited_df.drop(columns=["No"])
+    st.session_state.manual_sites = edited_df
     df_sites = edited_df.dropna(subset=["Site ID", "Longitude", "Latitude"], how="any")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("➕ Tambah Baris Baru"):
+            st.session_state.manual_sites.loc[len(st.session_state.manual_sites)] = ["", "", ""]
+    with col2:
+        if st.button("➖ Hapus Baris Terakhir") and len(st.session_state.manual_sites) > 0:
+            st.session_state.manual_sites = st.session_state.manual_sites.iloc[:-1]
 
 # =========================================================
 # 3️⃣ Tombol Proses
@@ -98,8 +91,6 @@ else:
 if df_sites is not None and not df_sites.empty:
     if st.button("🚀 Proses Sekarang"):
         with st.spinner("Menghitung site terdekat..."):
-            df_map = st.session_state.mapinfo_df.copy()
-
             def get_top3_nearest(lat, lon):
                 target = (lat, lon)
                 df_map["Distance_km"] = df_map.apply(
@@ -146,9 +137,9 @@ if df_sites is not None and not df_sites.empty:
                     cell.border = border
 
             for col in ws.columns:
-                max_length = max(len(str(cell.value)) if cell.value else 0 for cell in col)
                 col_letter = get_column_letter(col[0].column)
-                ws.column_dimensions[col_letter].width = max(10, max_length + 2)
+                max_length = max(len(str(cell.value)) if cell.value else 0 for cell in col)
+                ws.column_dimensions[col_letter].width = min(max(10, max_length + 2), 40)
 
             buf = BytesIO()
             wb.save(buf)
